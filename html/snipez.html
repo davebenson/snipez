@@ -2,12 +2,23 @@
 <head>
 <title>snipezzzz</title>
 <script type="text/javascript">
-function ajaxRequest() {
-  var activexmodes=["Msxml2.XMLHTTP", "Microsoft.XMLHTTP"] //activeX versions to check for in IE
-  if (window.ActiveXObject) { //Test for support for ActiveXObject in IE first (as XMLHttpRequest in IE7 is broken)
-    for (var i=0; i<activexmodes.length; i++){try{return new ActiveXObject(activexmodes[i])} catch(e){alert("Failed");}}
-    } else if (window.XMLHttpRequest) {return new XMLHttpRequest()} else {return false}
-    return;
+function ajaxRequest()
+{
+  //activeX versions to check for in IE
+  var activexmodes = ["Msxml2.XMLHTTP", "Microsoft.XMLHTTP"]
+
+  // Test for support for ActiveXObject in IE first
+  // (as XMLHttpRequest in IE7 is broken)
+  if (window.ActiveXObject) {
+    for (var i = 0; i<activexmodes.length; i++)
+    {
+      try { return new ActiveXObject(activexmodes[i]) }
+      catch(e) { alert("Failed");}
+    }
+  } else if (window.XMLHttpRequest) {
+    return new XMLHttpRequest();
+  } else
+    return false;
 }
 
 function download(url)
