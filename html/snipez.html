@@ -1,0 +1,66 @@
+<html>
+<head>
+<title>snipezzzz</title>
+<script type="text/javascript">
+function ajaxRequest() {
+  var activexmodes=["Msxml2.XMLHTTP", "Microsoft.XMLHTTP"] //activeX versions to check for in IE
+  if (window.ActiveXObject) { //Test for support for ActiveXObject in IE first (as XMLHttpRequest in IE7 is broken)
+    for (var i=0; i<activexmodes.length; i++){try{return new ActiveXObject(activexmodes[i])} catch(e){alert("Failed");}}
+    } else if (window.XMLHttpRequest) {return new XMLHttpRequest()} else {return false}
+    return;
+}
+
+function download(url)
+{
+  var mygetrequest=new ajaxRequest()
+
+  mygetrequest.onreadystatechange = function(){
+    if (mygetrequest.readyState==4){
+      if (mygetrequest.status==200) {
+        var j = JSON.parse(mygetrequest.responseText);
+	var can = document.getElementById("can");
+	var cxt = can.getContext("2d");
+	for (var i = 0; i < j.length; i++) {
+	  var elt = j[i];
+	  switch (elt.type)
+	  {
+	  case "box":
+	    cxt.fillStyle = elt.color;
+	    cxt.fillRect(elt.x, elt.y, elt.width, elt.height);
+	    break;
+          case "circle":
+	    cxt.fillStyle = elt.color;
+	    cxt.beginPath();
+	    cxt.arc(elt.x, elt.y, elt.radius, 0, Math.PI * 2, true);
+	    cxt.closePath();
+	    cxt.fill();
+	    break;
+	  }
+	}
+      } else {
+        alert("Download was not successful");
+      }
+    }
+  }
+  mygetrequest.open("POST", url, true);
+  mygetrequest.send(null);		
+}
+
+function update_canvas()
+{
+  download("http://frantic.pas.lab/test.json");
+}
+
+</script>
+</head>
+<body onload="update_canvas()" >
+
+<h1>My First Web Page</h1>
+<p id="demo">This is a paragraph.</p>
+
+<canvas id="can" width="400" height="400">
+  
+</canvas>
+
+</body>
+</html>
