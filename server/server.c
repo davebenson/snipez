@@ -21,6 +21,18 @@
 /* size of the cell in the maze, in tiles */
 #define CELL_SIZE       20
 
+/* period for update timer */
+#define UPDATE_PERIOD_USECS     200000
+
+/* number of updates dying lasts for */
+#define DEAD_TIME       20
+
+/* cells moved by bullets in a cycle */
+#define BULLET_SPEED    2
+
+/* enemies move random in 1/2 of cycles */
+#define ENEMY_MOVE_FRACTION    0.5
+
 #include "../../dsk/dsk.h"
 
 #include <stdlib.h>
@@ -32,6 +44,20 @@ static unsigned random_int_range (unsigned max)
 {
   return rand() % max;
 }
+static double random_double (void)
+{
+  return (double)rand () / RAND_MAX;
+}
+
+static unsigned
+mod (int x, unsigned denom)
+{
+  int rv = x % (int) denom;
+  if (rv < 0)
+    rv += denom;
+  return rv;
+}
+
 
 typedef struct _User User;
 typedef struct _Enemy Enemy;
@@ -42,17 +68,39 @@ typedef struct _Game Game;
 
 typedef struct _PendingUpdate PendingUpdate;
 
+static DskJsonValue * create_user_update (User                 *user);
+static void           respond_take_json  (DskHttpServerRequest *request,
+                                          DskJsonValue         *value);
+
+typedef enum
+{
+  OBJECT_TYPE_USER,
+  OBJECT_TYPE_BULLET,
+  OBJECT_TYPE_ENEMY
+} ObjectType;
+#define N_OBJECT_TYPES  3
+
+typedef struct _Object Object;
+struct _Object
+{
+  ObjectType type;
+  Object *prev_in_game, *next_in_game;
+  Object *prev_in_cell, *next_in_cell;
+  Game *game;
+  unsigned x, y;
+};
+
 struct _User
 {
+  Object base;
+
   char *name;
-  unsigned x, y;
   unsigned width, height;               /* canvas width, height */
 
   unsigned last_seen_time;
-  Game *game;
-  User *next_in_game, *prev_in_game;
-  User *next_in_cell, *prev_in_cell;
   int move_x, move_y;
+
+  unsigned dead_count;
 
   /* if you connect and you already have gotten the latest
      screen, we make you wait for the next update. */
@@ -61,17 +109,15 @@ struct _User
 
 struct _Enemy
 {
-  unsigned x, y;
-  Enemy *prev_in_game, *next_in_game;
-  Enemy *prev_in_cell, *next_in_cell;
+  Object base;
 };
 
 struct _Bullet
 {
   unsigned x, y;
-  int delta_x, delta_y;
-  Bullet *next_in_cell, *prev_in_cell;;
-  Bullet *next_global;
+  int move_x, move_y;           /* max 1 -- see bullet speed */
+  Bullet *next_in_cell, *prev_in_cell;
+  Bullet *next_in_game, *prev_in_game;
 };
 
 struct _Generator
@@ -79,14 +125,12 @@ struct _Generator
   Game *game;
   unsigned x, y;
   double generator_prob;
-  Generator *next;
+  Generator *next_in_game, *prev_in_game;
 };
 
 struct _Cell
 {
-  Bullet *bullets;
-  Enemy *enemies;
-  User *users;
+  Object *objects[N_OBJECT_TYPES];
   Generator *generator;
 };
 
@@ -99,14 +143,19 @@ struct _Game
   uint8_t *h_walls;             /* universe_height x universe_width */
   uint8_t *v_walls;             /* universe_height x universe_width */
 
-  User *users;
+  Object *objects[N_OBJECT_TYPES];
 
   Cell *cells;               /* universe_height x universe_width */
-  Bullet *all_bullets;
+  Generator *generators;
   dsk_boolean wrap;
+  dsk_boolean diag_bullets_bounce;
+  dsk_boolean bullet_kills_player;
+  dsk_boolean bullet_kills_generator;
 
   unsigned latest_update;
   PendingUpdate *pending_updates;
+
+  DskDispatchTimer *timer;
 };
 static Game *all_games;
 
@@ -116,6 +165,19 @@ struct _PendingUpdate
   DskHttpServerRequest *request;
   PendingUpdate *next;
 };
+
+static int
+int_div (int a, unsigned b)
+{
+  if (a < 0)
+    {
+      unsigned A = -a;
+      unsigned quot = (A + b - 1) / b;
+      return -quot;
+    }
+  else
+    return a/b;
+}
 
 /* --- Creating a new game --- */
 static uint8_t *generate_ones (unsigned count)
@@ -173,11 +235,14 @@ static void swap_ints (unsigned *a, unsigned *b)
   *b = swap;
 }
 
+static void game_update_timer_callback (Game *game);
+
 static Game *
 create_game (const char *name)
 {
   Game *game = dsk_malloc (sizeof (Game));
   unsigned usize;
+  unsigned i;
 
   game->name = dsk_strdup (name);
   game->next_game = all_games;
@@ -187,18 +252,24 @@ create_game (const char *name)
   usize = game->universe_height * game->universe_width;
   game->h_walls = generate_ones (usize);
   game->v_walls = generate_ones (usize);
-  game->users = NULL;
+  for (i = 0; i < N_OBJECT_TYPES; i++)
+    game->objects[i] = NULL;
   game->cells = dsk_malloc0 (sizeof (Cell) * game->universe_width * game->universe_height);
   game->latest_update = 0;
   game->wrap = DSK_TRUE;
+  game->diag_bullets_bounce = DSK_TRUE;
+  game->bullet_kills_player = DSK_TRUE;
+  game->bullet_kills_generator = DSK_TRUE;
 
-  /* Generate with modified kruskals algorithm */
+  /* Generate with Modified Kruskals Algorithm, see 
+   *    http://en.wikipedia.org/wiki/Maze_generation_algorithm
+   */
   usize = game->universe_width * game->universe_height;
   TmpWall *tmp_walls = dsk_malloc (sizeof (TmpWall) * usize * 2);
   TmpSetInfo *sets = dsk_malloc (sizeof (TmpSetInfo) * usize);
 
   /* connect the walls together in random order */
-  unsigned *scramble, i;
+  unsigned *scramble;
   scramble = dsk_malloc (sizeof (unsigned) * usize * 2);
   for (i = 0; i < usize * 2; i++)
     scramble[i] = i;
@@ -315,6 +386,33 @@ create_game (const char *name)
 
   dsk_free (tmp_walls);
   dsk_free (sets);
+
+  /* generate generators */
+  unsigned n_generators = 12 + rand () % 6;
+  while (i < n_generators)
+    {
+      unsigned idx = random_int_range (usize);
+      Cell *cell = game->cells + idx;
+      if (cell->generator == NULL)
+        {
+          cell->generator = dsk_malloc (sizeof (Generator));
+          cell->generator->game = game;
+          cell->generator->x = (idx % game->universe_width) * CELL_SIZE + CELL_SIZE/2;
+          cell->generator->y = (idx / game->universe_width) * CELL_SIZE + CELL_SIZE/2;
+          cell->generator->generator_prob = 0.01;
+          cell->generator->next_in_game = game->generators;
+          cell->generator->prev_in_game = NULL;
+          if (game->generators)
+            game->generators->prev_in_game = cell->generator;
+          game->generators = cell->generator;
+
+          i++;
+        }
+    }
+
+  game->timer = dsk_main_add_timer (0, UPDATE_PERIOD_USECS,
+                                    (DskTimerFunc) game_update_timer_callback,
+                                    game);
   return game;
 }
 
@@ -337,23 +435,31 @@ typedef enum
     ENEMY       Enemy
     GENERATOR   Generator
  */
+static Object *cell_find_object (Cell *cell,
+                                 ObjectType type,
+                                 unsigned x, unsigned y)
+{
+  Object *object;
+  for (object = cell->objects[type]; object; object = object->next_in_cell)
+    if (object->x == x && object->y == y)
+      return object;
+  return NULL;
+}
 static OccType
 get_occupancy (Game *game, unsigned x, unsigned y, void **ptr_out)
 {
   Cell *cell;
-  User *user;
-  Bullet *bullet;
-  Enemy *enemy;
+  Object *object;
   if (x >= CELL_SIZE * game->universe_width
    || y >= CELL_SIZE * game->universe_height)
     return OCC_WALL;
   cell = game->cells + (x / CELL_SIZE) + (y / CELL_SIZE) * game->universe_width;
-  for (user = cell->users; user; user = user->next_in_cell)
-    if (user->x == x && user->y == y)
-      {
-        *ptr_out = user;
-        return OCC_USER;
-      }
+  object = cell_find_object (cell, OBJECT_TYPE_USER, x, y);
+  if (object)
+    {
+      *ptr_out = object;
+      return OCC_USER;
+    }
   if (cell->generator
       && (cell->generator->x == x || cell->generator->x + 1 == x)
       && (cell->generator->y == y || cell->generator->y + 1 == y))
@@ -361,19 +467,358 @@ get_occupancy (Game *game, unsigned x, unsigned y, void **ptr_out)
       *ptr_out = cell->generator;
       return OCC_GENERATOR;
     }
-  for (bullet = cell->bullets; bullet; bullet = bullet->next_in_cell)
-    if (bullet->x == x && bullet->y == y)
-      {
-        *ptr_out = bullet;
-        return OCC_BULLET;
-      }
-  for (enemy = cell->enemies; enemy; enemy = enemy->next_in_cell)
-    if (enemy->x == x && enemy->y == y)
-      {
-        *ptr_out = enemy;
-        return OCC_ENEMY;
-      }
+  object = cell_find_object (cell, OBJECT_TYPE_BULLET, x, y);
+  if (object)
+    {
+      *ptr_out = object;
+      return OCC_BULLET;
+    }
+  object = cell_find_object (cell, OBJECT_TYPE_ENEMY, x, y);
+  if (object)
+    {
+      *ptr_out = object;
+      return OCC_ENEMY;
+    }
   return OCC_EMPTY;
+}
+
+
+static void
+remove_object_from_cell_list (Object *object)
+{
+  unsigned idx = (object->x/CELL_SIZE)
+               + (object->y/CELL_SIZE) * object->game->universe_width;
+  Cell *cell = object->game->cells + idx;
+  if (object->prev_in_cell != NULL)
+    object->prev_in_cell->next_in_cell = object->next_in_cell;
+  else
+    cell->objects[object->type] = object->next_in_cell;
+  if (object->next_in_cell != NULL)
+    object->next_in_cell->prev_in_cell = object->prev_in_cell;
+}
+
+static void
+add_object_to_cell_list (Object *object)
+{
+  unsigned idx = (object->x/CELL_SIZE)
+               + (object->y/CELL_SIZE) * object->game->universe_width;
+  Cell *cell = object->game->cells + idx;
+
+  object->next_in_cell = cell->objects[object->type];
+  if (object->next_in_cell)
+    object->next_in_cell->prev_in_cell = object;
+  object->prev_in_cell = NULL;
+  cell->objects[object->type] = object;
+}
+
+static void
+move_object (Object *object, unsigned x, unsigned y)
+{
+  remove_object_from_cell_list (object);
+  object->x = x;
+  object->y = y;
+  add_object_to_cell_list (object);
+}
+
+static void
+remove_object_from_game_list (Object *object)
+{
+  if (object->prev_in_game != NULL)
+    object->prev_in_game->next_in_game = object->next_in_game;
+  else
+    object->game->objects[object->type] = object->next_in_game;
+  if (object->next_in_game != NULL)
+    object->next_in_game->prev_in_game = object->prev_in_game;
+}
+
+static void
+add_object_to_game_list (Object *object)
+{
+  Game *game = object->game;
+  object->next_in_game = game->objects[object->type];
+  if (object->next_in_game)
+    object->next_in_game->prev_in_game = object;
+  object->prev_in_game = NULL;
+  game->objects[object->type] = object;
+}
+
+static void
+teleport_object (Object *object)
+{
+  Game *game = object->game;
+  void *dummy;
+  do
+    {
+      object->x = random_int_range (game->universe_width * CELL_SIZE);
+      object->y = random_int_range (game->universe_height * CELL_SIZE);
+    }
+  while (get_occupancy (game, object->x, object->y, &dummy) != OCC_EMPTY);
+}
+
+static void
+game_update_timer_callback (Game *game)
+{
+  /* run players */
+  Object *object;
+
+  for (object = game->objects[OBJECT_TYPE_USER]; object != NULL; )
+    {
+      User *user = (User *) object;
+      dsk_boolean destroy_user = DSK_FALSE;
+      if (user->dead_count > 0)
+        {
+          user->dead_count -= 1;
+          if (user->dead_count)
+            {
+              teleport_object (&user->base);
+              add_object_to_cell_list (object);
+            }
+          continue;
+        }
+      if (user->move_x || user->move_y)
+        {
+          int new_x = object->x + user->move_x;
+          int new_y = object->y + user->move_y;
+          void *obj;
+          if (game->wrap)
+            {
+              new_x = mod (new_x, game->universe_width * CELL_SIZE);
+              new_y = mod (new_y, game->universe_height * CELL_SIZE);
+            }
+          switch (get_occupancy (game, new_x, new_y, &obj))
+            {
+            case OCC_EMPTY:
+              move_object (object, new_x, new_y);
+              break;
+            case OCC_WALL:
+            case OCC_USER:
+              /* move blocked harmlessly */
+              break;
+            case OCC_ENEMY:
+              destroy_user = DSK_TRUE;
+              break;
+            case OCC_BULLET:
+              destroy_user = DSK_TRUE;
+              remove_object_from_cell_list (obj);
+              remove_object_from_game_list (obj);
+              break;
+            case OCC_GENERATOR:
+              destroy_user = DSK_TRUE;
+              break;
+            }
+        }
+      if (destroy_user)
+        {
+          remove_object_from_cell_list (object);
+          user->dead_count = DEAD_TIME;
+        }
+
+      object = object->next_in_game;
+    }
+
+  /* update bullets, kill stuff */
+  {
+    unsigned bi;
+    for (bi = 0; bi < BULLET_SPEED; bi++)
+      {
+        for (object = game->objects[OBJECT_TYPE_BULLET]; object != NULL; )
+          {
+            Bullet *bullet = (Bullet *) object;
+            int new_x, new_y;
+            dsk_boolean destroy_bullet;
+  retry:
+            new_x = object->x + bullet->move_x;
+            new_y = object->y + bullet->move_y;
+            if (game->wrap)
+              {
+                new_x = mod (new_x, game->universe_width * CELL_SIZE);
+                new_y = mod (new_y, game->universe_height * CELL_SIZE);
+              }
+            destroy_bullet = DSK_TRUE;
+            void *obj;
+            switch (get_occupancy (game, new_x, new_y, &obj))
+              {
+              case OCC_EMPTY:
+                move_object (object, new_x, new_y);
+                destroy_bullet = DSK_FALSE;
+                break;
+              case OCC_WALL:
+                if (bullet->move_x && bullet->move_y && game->diag_bullets_bounce)
+                  {
+                    void *dummy;
+                    dsk_boolean xflip = get_occupancy (game, new_x, object->y, &dummy) == OCC_WALL;
+                    dsk_boolean yflip = get_occupancy (game, object->x, new_y, &dummy) == OCC_WALL;
+                    if (!xflip && !yflip)
+                      xflip = yflip = DSK_TRUE;
+                    if (xflip)
+                      bullet->move_x = -bullet->move_x;
+                    if (yflip)
+                      bullet->move_y = -bullet->move_y;
+                    goto retry;
+                  }
+                break;
+
+              case OCC_USER:
+                if (game->bullet_kills_player)
+                  {
+                    /* user dies */
+                    User *user = obj;
+                    remove_object_from_cell_list (obj);
+                    user->dead_count = DEAD_TIME;
+                  }
+                break;
+              case OCC_ENEMY:
+                /* destroy enemy */
+                remove_object_from_cell_list (obj);
+                remove_object_from_game_list (obj);
+                dsk_free (obj);
+                break;
+              case OCC_BULLET:
+                /* destroy other bullet */
+                remove_object_from_cell_list (obj);
+                remove_object_from_game_list (obj);
+                dsk_free (obj);
+                break;
+              case OCC_GENERATOR:
+                if (game->bullet_kills_generator)
+                  {
+                    Generator *gen = obj;
+                    Cell *cell = game->cells + (gen->x/CELL_SIZE)
+                               + (gen->y/CELL_SIZE) * game->universe_width;
+                    dsk_assert (cell->generator == gen);
+                    cell->generator = NULL;
+
+                    /* remove generator from list */
+                    if (gen->prev_in_game)
+                      gen->prev_in_game->next_in_game = gen->next_in_game;
+                    else
+                      game->generators = gen->next_in_game;
+                    if (gen->next_in_game)
+                      gen->next_in_game->prev_in_game = gen->prev_in_game;
+
+                    cell->generator = NULL;
+                    dsk_free (gen);
+                  }
+                break;
+              }
+            if (destroy_bullet)
+              {
+                Object *next = object->next_in_game;
+                remove_object_from_cell_list (object);
+                remove_object_from_game_list (object);
+                dsk_free (bullet);
+                object = next;
+              }
+            else
+              object = object->next_in_game;
+          }
+      }
+  }
+
+  /* update enemies */
+  for (object = game->objects[OBJECT_TYPE_ENEMY]; object != NULL; )
+    {
+      //Enemy *enemy = (Enemy *) object;
+      int new_x, new_y;
+      new_x = object->x;
+      new_y = object->y;
+      if (random_double () < ENEMY_MOVE_FRACTION)
+        {
+          new_x += random_int_range (3) - 1;
+          new_y += random_int_range (3) - 1;
+        }
+      if (game->wrap)
+        {
+          new_x = mod (new_x, game->universe_width * CELL_SIZE);
+          new_y = mod (new_y, game->universe_height * CELL_SIZE);
+        }
+      dsk_boolean destroy_enemy = DSK_FALSE;
+      void *obj;
+      switch (get_occupancy (game, new_x, new_y, &obj))
+        {
+        case OCC_EMPTY:
+          move_object (object, new_x, new_y);
+          break;
+        case OCC_WALL:
+          break;
+
+        case OCC_USER:
+          /* enemy kills user */
+          remove_object_from_game_list (obj);
+          remove_object_from_cell_list (obj);
+          ((User*)obj)->dead_count = DEAD_TIME;
+          break;
+        case OCC_ENEMY:
+          /* move suppressed */
+          break;
+        case OCC_BULLET:
+          /* destroy bullet */
+          remove_object_from_cell_list (obj);
+          remove_object_from_game_list (obj);
+          dsk_free (obj);
+          destroy_enemy = DSK_TRUE;
+          break;
+        case OCC_GENERATOR:
+          break;
+        }
+      if (destroy_enemy)
+        {
+          Object *next = object->next_in_game;
+          remove_object_from_cell_list (object);
+          remove_object_from_game_list (object);
+          dsk_free (object);
+          object = next;
+        }
+      else
+        object = object->next_in_game;
+    }
+
+  /* run generators */
+  Generator *gen;
+  for (gen = game->generators; gen; gen = gen->next_in_game)
+    {
+      if (random_double () < gen->generator_prob)
+        {
+          /* try generating enemy */
+          int positions[12][2] = { {-1,-1}, {-1,0}, {-1,1}, {-1,2},
+                                   {0,2}, {1,2}, {2,2},
+                                   {2,1}, {2,0}, {2,-1},
+                                   {1,-1}, {0,-1} };
+          unsigned p = random_int_range (12);
+          int dx = positions[p][0];
+          int dy = positions[p][1];
+          unsigned x = gen->x + dx;
+          unsigned y = gen->y + dy;
+          void *dummy;
+          if (get_occupancy (game, x, y, &dummy) == OCC_EMPTY)
+            {
+              /* create enemy */
+              Enemy *enemy = dsk_malloc (sizeof (Enemy));
+              enemy->base.type = OBJECT_TYPE_ENEMY;
+              enemy->base.x = x;
+              enemy->base.y = y;
+              enemy->base.game = game;
+              add_object_to_cell_list (object);
+              add_object_to_game_list (object);
+            }
+        }
+    }
+
+  /* finish any requests that were waiting for a new frame */
+  while (game->pending_updates != NULL)
+    {
+      DskJsonValue *state_json;
+      PendingUpdate *pu = game->pending_updates;
+      game->pending_updates = pu;
+
+      state_json = create_user_update (pu->user);
+      respond_take_json (pu->request, state_json);
+      dsk_free (pu);
+    }
+
+  game->timer = dsk_main_add_timer (0, UPDATE_PERIOD_USECS,
+                                    (DskTimerFunc) game_update_timer_callback,
+                                    game);
 }
 
 /* --- Creating a user in a game --- */
@@ -382,35 +827,27 @@ create_user (Game *game, const char *name, unsigned width, unsigned height)
 {
   User *user = dsk_malloc (sizeof (User));
   Cell *cell;
-  void *dummy;
 
   user->name = dsk_strdup (name);
+  user->base.type = OBJECT_TYPE_USER;
+  user->base.game = game;
 
   /* pick random unoccupied position */
-  do
-    {
-      user->x = random_int_range (game->universe_width * CELL_SIZE);
-      user->y = random_int_range (game->universe_height * CELL_SIZE);
-    }
-  while (get_occupancy (game, user->x, user->y, &dummy) != OCC_EMPTY);
+  teleport_object (&user->base);
 
   cell = game->cells
-       + (user->x / CELL_SIZE)
-       + (user->y / CELL_SIZE) * game->universe_width;
+       + (user->base.x / CELL_SIZE)
+       + (user->base.y / CELL_SIZE) * game->universe_width;
 
-  user->next_in_cell = user;
-  user->prev_in_cell = NULL;
-  cell->users = user;
+  add_object_to_game_list (&user->base);
+  add_object_to_cell_list (&user->base);
 
   user->width = width;
   user->height = height;
 
-  user->next_in_game = game->users;
-  user->prev_in_game = NULL;
-  game->users = user;
+  user->dead_count = 0;
 
   user->last_seen_time = dsk_dispatch_default ()->last_dispatch_secs;
-  user->game = game;
   user->move_x = user->move_y = 0;
   user->last_update = (unsigned)(-1);
   return user;
@@ -418,18 +855,6 @@ create_user (Game *game, const char *name, unsigned width, unsigned height)
 
 /* --- rendering --- */
 
-static int
-int_div (int a, unsigned b)
-{
-  if (a < 0)
-    {
-      unsigned A = -a;
-      unsigned quot = (A + b - 1) / b;
-      return -quot;
-    }
-  else
-    return a/b;
-}
 static void
 append_element_json (unsigned *n_inout,
                      DskJsonValue ***arr_inout,
@@ -565,7 +990,7 @@ add_generator (unsigned *n_inout,
 static DskJsonValue *
 create_user_update (User *user)
 {
-  Game *game = user->game;
+  Game *game = user->base.game;
 
   /* width/height in various units, rounded up */
   unsigned tile_width = (user->width + TILE_SIZE - 1) / TILE_SIZE;
@@ -574,8 +999,8 @@ create_user_update (User *user)
   unsigned cell_height = (tile_height + CELL_SIZE - 1) / CELL_SIZE;
 
   /* left/upper corner, rounded down */
-  int min_tile_x = user->x - (tile_width+1) / 2;
-  int min_tile_y = user->y - (tile_height+1) / 2;
+  int min_tile_x = user->base.x - (tile_width+1) / 2;
+  int min_tile_y = user->base.y - (tile_height+1) / 2;
   int min_cell_x = int_div (min_tile_x, CELL_SIZE);
   int min_cell_y = int_div (min_tile_y, CELL_SIZE);
 
@@ -590,8 +1015,8 @@ create_user_update (User *user)
       {
         int ucx = x + min_cell_x;               /* un-wrapped x, y */
         int ucy = y + min_cell_y;
-        int px = (ucx * CELL_SIZE - user->x) * TILE_SIZE + user->width / 2 - TILE_SIZE / 2;
-        int py = (ucy * CELL_SIZE - user->y) * TILE_SIZE + user->height / 2 - TILE_SIZE / 2;
+        int px = (ucx * CELL_SIZE - user->base.x) * TILE_SIZE + user->width / 2 - TILE_SIZE / 2;
+        int py = (ucy * CELL_SIZE - user->base.y) * TILE_SIZE + user->height / 2 - TILE_SIZE / 2;
         unsigned cx, cy;
         Cell *cell;
 
@@ -646,31 +1071,29 @@ create_user_update (User *user)
         cell = game->cells + (game->universe_width * cy + cx);
 
         /* render bullets */
-        Bullet *bullet;
-        for (bullet = cell->bullets; bullet; bullet = bullet->next_in_cell)
+        Object *object;
+        for (object = cell->objects[OBJECT_TYPE_BULLET]; object; object = object->next_in_cell)
           {
-            int bx = px + (bullet->x - cx * CELL_SIZE) * TILE_SIZE + TILE_SIZE / 2;
-            int by = py + (bullet->y - cy * CELL_SIZE) * TILE_SIZE + TILE_SIZE / 2;
+            int bx = px + (object->x - cx * CELL_SIZE) * TILE_SIZE + TILE_SIZE / 2;
+            int by = py + (object->y - cy * CELL_SIZE) * TILE_SIZE + TILE_SIZE / 2;
             add_bullet (&n_elements, &elements, &alloced,
                         bx, by);
           }
 
         /* render dudes */
-        User *guser;
-        for (guser = cell->users; guser; guser = guser->next_in_cell)
+        for (object = cell->objects[OBJECT_TYPE_USER]; object; object = object->next_in_cell)
           {
-            int bx = px + (guser->x - cx * CELL_SIZE) * TILE_SIZE + TILE_SIZE / 2;
-            int by = py + (guser->y - cy * CELL_SIZE) * TILE_SIZE + TILE_SIZE / 2;
+            int bx = px + (object->x - cx * CELL_SIZE) * TILE_SIZE + TILE_SIZE / 2;
+            int by = py + (object->y - cy * CELL_SIZE) * TILE_SIZE + TILE_SIZE / 2;
             add_user (&n_elements, &elements, &alloced,
-                      bx, by, user == guser);
+                      bx, by, user == (User*) object);
           }
 
         /* render bad guys */
-        Enemy *enemy;
-        for (enemy = cell->enemies; enemy; enemy = enemy->next_in_cell)
+        for (object = cell->objects[OBJECT_TYPE_ENEMY]; object; object = object->next_in_cell)
           {
-            int bx = px + (enemy->x - cx * CELL_SIZE) * TILE_SIZE + TILE_SIZE / 2;
-            int by = py + (enemy->y - cy * CELL_SIZE) * TILE_SIZE + TILE_SIZE / 2;
+            int bx = px + (object->x - cx * CELL_SIZE) * TILE_SIZE + TILE_SIZE / 2;
+            int by = py + (object->y - cy * CELL_SIZE) * TILE_SIZE + TILE_SIZE / 2;
             add_enemy (&n_elements, &elements, &alloced, bx, by);
           }
 
@@ -679,7 +1102,7 @@ create_user_update (User *user)
           {
             int bx = px + (cell->generator->x - cx * CELL_SIZE) * TILE_SIZE + TILE_SIZE;
             int by = py + (cell->generator->y - cy * CELL_SIZE) * TILE_SIZE + TILE_SIZE;
-            add_generator (&n_elements, &elements, &alloced, bx, by, user->game->latest_update);
+            add_generator (&n_elements, &elements, &alloced, bx, by, object->game->latest_update);
           }
       }
   DskJsonValue *rv;
@@ -704,10 +1127,10 @@ find_user (const char *name)
   Game *game;
   for (game = all_games; game; game = game->next_game)
     {
-      User *user;
-      for (user = game->users; user; user = user->next_in_game)
-        if (strcmp (user->name, name) == 0)
-          return user;
+      Object *object;
+      for (object = game->objects[OBJECT_TYPE_USER]; object != NULL; object = object->next_in_game)
+        if (strcmp (((User*)object)->name, name) == 0)
+          return (User*) object;
     }
   return NULL;
 }
@@ -748,7 +1171,7 @@ handle_get_games_list (DskHttpServerRequest *request)
   at = game_info;
   for (game = all_games; game; game = game->next_game, at++)
     {
-      User *player;
+      Object *object;
       unsigned n_players = 0;
       DskJsonValue **pat;
       DskJsonMember members[2] = {
@@ -756,13 +1179,15 @@ handle_get_games_list (DskHttpServerRequest *request)
         { "players", NULL },
       };
       DskJsonValue **players;
-      player = game->users;
-      for (player = game->users; player; player = player->next_in_game)
+      for (object = game->objects[OBJECT_TYPE_USER]; object != NULL; object = object->next_in_game)
         n_players++;
       players = dsk_malloc (sizeof (DskJsonValue *) * n_players);
       pat = players;
-      for (player = game->users; player; player = player->next_in_game)
-        *pat++ = dsk_json_value_new_string (strlen (player->name), player->name);
+      for (object = game->objects[OBJECT_TYPE_USER]; object != NULL; object = object->next_in_game)
+        {
+          User *player = (User *)object;
+          *pat++ = dsk_json_value_new_string (strlen (player->name), player->name);
+        }
       members[1].value = dsk_json_value_new_array (n_players, players);
       dsk_free (players);
       *at++ = dsk_json_value_new_object (DSK_N_ELEMENTS (members), members);
@@ -803,7 +1228,7 @@ handle_join_existing_game (DskHttpServerRequest *request)
   user = find_user (user_var->value);
   if (user != NULL)
     {
-      snprintf (buf, sizeof (buf), "user %s already found in %s", user->name, user->game->name);
+      snprintf (buf, sizeof (buf), "user %s already found in %s", user->name, user->base.game->name);
       dsk_http_server_request_respond_error (request, DSK_HTTP_STATUS_BAD_REQUEST, buf);
       return;
     }
@@ -845,7 +1270,7 @@ handle_create_new_game (DskHttpServerRequest *request)
   user = find_user (user_var->value);
   if (user != NULL)
     {
-      snprintf (buf, sizeof (buf), "user %s already found in %s", user->name, user->game->name);
+      snprintf (buf, sizeof (buf), "user %s already found in %s", user->name, user->base.game->name);
       dsk_http_server_request_respond_error (request, DSK_HTTP_STATUS_BAD_REQUEST, buf);
       return;
     }
@@ -871,14 +1296,14 @@ handle_update_game (DskHttpServerRequest *request)
       dsk_http_server_request_respond_error (request, DSK_HTTP_STATUS_BAD_REQUEST, buf);
       return;
     }
-  if (user->last_update == user->game->latest_update)
+  if (user->last_update == user->base.game->latest_update)
     {
       /* wait for next frame */
       PendingUpdate *pu = dsk_malloc (sizeof (PendingUpdate));
       pu->user = user;
       pu->request = request;
-      pu->next = user->game->pending_updates;
-      user->game->pending_updates = pu;
+      pu->next = user->base.game->pending_updates;
+      user->base.game->pending_updates = pu;
     }
   else
     {
@@ -903,6 +1328,7 @@ int main(int argc, char **argv)
 {
   unsigned port = 0;
   DskHttpServer *server;
+  unsigned i;
 
   dsk_cmdline_init ("snipez server", "Run a snipez server", NULL, 0);
   dsk_cmdline_add_uint ("port", "Port Number",
