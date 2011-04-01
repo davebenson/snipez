@@ -1,0 +1,30 @@
+I have been thinking a bit about concrete prototyping plans.
+
+I think we should implement, as a strawman:
+  - the state of the game (on the server) is merely:
+    is there a gold coin at that location
+  - when you are at a location where you think a gold coin
+    might be, hit the website on your phone
+  - an "adminstrator" (ie one of us) will define locations and
+    reward creation
+
+Directions from the strawman example:
+  - multiple types of rewards
+  - ways to use rewards
+  - extensibility / ease of creating more game-play
+  - continual tracking versus checking in
+  - story
+  - game play
+  - challenges to collect rewards
+
+I think more-and-more that having a convenient way
+to allow users to customize the world is kinda critical.
+As a minimal prototype:  you could define a place, and give a picture
+to display when you are there.  (or, more precisely, when we think
+you are there: I suspect a characteristic element 
+of the game is actually going to dealing with GPS suckage)
+
+
+other points:
+  - "comet" is the umbrella term for using HTTP responses as a sub/pub
+    connection (ie streaming input from HTTP server)
