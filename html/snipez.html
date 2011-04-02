@@ -2,74 +2,129 @@
 <head>
 <title>snipezzzz</title>
 <script type="text/javascript">
-function ajaxRequest()
+function ajax_json(url, handler)
 {
-  //activeX versions to check for in IE
-  var activexmodes = ["Msxml2.XMLHTTP", "Microsoft.XMLHTTP"]
+  var req = new XMLHttpRequest();
 
-  // Test for support for ActiveXObject in IE first
-  // (as XMLHttpRequest in IE7 is broken)
-  if (window.ActiveXObject) {
-    for (var i = 0; i<activexmodes.length; i++)
+  req.onreadystatechange = function()
+  {
+    if (req.readyState==4)
     {
-      try { return new ActiveXObject(activexmodes[i]) }
-      catch(e) { alert("Failed");}
-    }
-  } else if (window.XMLHttpRequest) {
-    return new XMLHttpRequest();
-  } else
-    return false;
-}
-
-function download(url)
-{
-  var mygetrequest=new ajaxRequest()
-
-  mygetrequest.onreadystatechange = function(){
-    if (mygetrequest.readyState==4){
-      if (mygetrequest.status==200) {
-        var j = JSON.parse(mygetrequest.responseText);
-	var can = document.getElementById("can");
-	var cxt = can.getContext("2d");
-	for (var i = 0; i < j.length; i++) {
-	  var elt = j[i];
-	  switch (elt.type)
-	  {
-	  case "box":
-	    cxt.fillStyle = elt.color;
-	    cxt.fillRect(elt.x, elt.y, elt.width, elt.height);
-	    break;
-          case "circle":
-	    cxt.fillStyle = elt.color;
-	    cxt.beginPath();
-	    cxt.arc(elt.x, elt.y, elt.radius, 0, Math.PI * 2, true);
-	    cxt.closePath();
-	    cxt.fill();
-	    break;
-	  }
-	}
-      } else {
-        alert("Download was not successful");
+      if (req.status==200)
+      {
+        handler(JSON.parse(req.responseText));
       }
+    } else {
+      alert("Download was not successful");
     }
   }
-  mygetrequest.open("POST", url, true);
-  mygetrequest.send(null);		
+  req.open("POST", url, true);
+  req.send(null);		
 }
 
-function update_canvas()
+function render_screen(elements)
 {
-  download("http://frantic.pas.lab/test.json");
+  var canvas = document.getElementById("can");
+  var context = canvas.getContext("2d");
+
+  // clear canvas
+  context.fillStyle = "#000000";
+  context.fillRect(0, 0, can.width, can.height);
+
+  // render each element
+  for (var i = 0; i < elements.length; i++)
+  {
+    var elt = elements[i];
+    switch (elt.type)
+    {
+    case "rectangle":
+      context.fillStyle = elt.color;
+      context.fillRect(elt.x, elt.y, elt.width, elt.height);
+      break;
+    case "circle":
+      context.fillStyle = elt.color;
+      context.beginPath();
+      context.arc(elt.x, elt.y, elt.radius, 0, Math.PI * 2, true);
+      context.closePath();
+      context.fill();
+      break;
+    case "hollow_box":
+      ... USE:  elt.x elt.y elt.width elt.height elt.color
+      context.strokeStyle = elt.color;
+      context.strokeRect(elt.x, elt.y, elt.width, elt.height);
+      break;
+    }
+  }
+}
+
+
+var in_game = false;
+var game_name;
+var user_name;
+
+function update_handler()
+{
+  // compute update url
+  var url = "/update?user=" . urlencode(user_name);
+  ...
+
+  // Make request, with a callback that will re-invoke this
+  // function.  (The server blocks if we request twice in
+  // one update cycle, so this is efficient, i.e. not just busy looping)
+  ajax_json(url,
+            function (j) {
+	      render_screen(j);
+	      update_handler();
+	    }
+	   );
+}
+
+// Code to allow the user the pick a running game,
+// or start a new one.
+function select_game()
+{
+  var container = document.getElementById("select_game");
+
+  // delete the prior content 
+  container.childNodes = [];
+
+  // enable "Enter your user-id"
+  document.getElementById("enter_user_id").style = "default"; ///XXX: what is the default style named?
+
+  // enable "Start new game"
+  ...
+
+  // fetch the list of active games
+  download("/games?user=" + urlencode(getElementById("userid_entry").text),
+           function (j)
+	   {
+	     // handle the JSON response: create a list of active games,
+	     // each of which will require an "onclick" handler.
+	     ...
+
+	     // make the selection menu visible
+	     container.style = "visible";
+           });
 }
 
 </script>
 </head>
-<body onload="update_canvas()" >
+<body onload="select_game()" >
 
-<h1>My First Web Page</h1>
-<p id="demo">This is a paragraph.</p>
+<h1>Snipez</h1>
 
-<canvas id="can" width="400" height="400">
+<!-- will be filled up, occasionally, with a game-selection dialog -->
+<p id="select_game" style="invisible">
+</p>
+
+<!-- dialog to enter the user-id, needed to join or create a game -->
+<p id="enter_user_id" style="invisible">
+Enter your user-id:
+ <input type="text" id="user_id_input" />
+</p>
+
+<!-- space for rendering the world -->
+<canvas id="can" width="700" height="400" style="invisible">
   
 </canvas>
 

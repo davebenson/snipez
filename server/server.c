@@ -1329,6 +1329,7 @@ int main(int argc, char **argv)
   unsigned port = 0;
   DskHttpServer *server;
   unsigned i;
+  DskError *error = NULL;
 
   dsk_cmdline_init ("snipez server", "Run a snipez server", NULL, 0);
   dsk_cmdline_add_uint ("port", "Port Number",
@@ -1346,6 +1347,8 @@ int main(int argc, char **argv)
                                             NULL, NULL);
       dsk_http_server_match_restore (server);
     }
+  if (!dsk_http_server_bind_tcp (server, NULL, port, &error))
+    dsk_die ("error binding to port %u: %s", port, error->message);
 
   return dsk_main_run ();
 }
