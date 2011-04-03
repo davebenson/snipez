@@ -16,13 +16,13 @@
  */
 
 /* size of a single tile in pixels */
-#define TILE_SIZE       8
+#define TILE_SIZE       9
 
 /* size of the cell in the maze, in tiles */
-#define CELL_SIZE       20
+#define CELL_SIZE       10
 
 /* period for update timer */
-#define UPDATE_PERIOD_USECS     200000
+#define UPDATE_PERIOD_MSECS     50
 
 /* number of updates dying lasts for */
 #define DEAD_TIME       20
@@ -205,21 +205,16 @@ struct _TmpSetInfo
 };
 
 static void
-remove_tmp_wall (Game *game,
-                 TmpWall *tmp_walls,
+remove_tmp_wall (TmpWall *tmp_walls,
                  unsigned index,
                  TmpWall **wall_list_inout)
 
 {
   TmpWall *remove = tmp_walls + index;
-  unsigned x = (index / 2) % game->universe_width;
-  unsigned y = (index / 2) / game->universe_width;
-  unsigned h = index % 2;
 
   /* ignore previously deleted elements */
   if (remove->prev == (void*) 1)
     return;
-  dsk_warning ("removing tmp_wall from candidate list %c at %u,%u",h?'h':'v', x,y);
   if (remove->prev == NULL)
     {
       dsk_assert (*wall_list_inout == remove);
@@ -230,10 +225,6 @@ remove_tmp_wall (Game *game,
   if (remove->next != NULL)
     remove->next->prev = remove->prev;
   remove->prev = remove->next = (void*) 1;
-  if (h)
-    game->h_walls[x + y * game->universe_width] = 0;
-  else
-    game->v_walls[x + y * game->universe_width] = 0;
 }
 
 
@@ -288,7 +279,7 @@ create_game (const char *name,
     swap_ints (scramble + random_int_range (usize * 2), scramble + random_int_range (usize * 2));
 
   TmpWall *wall_list = NULL;
-  for (i = 0; i < usize; i++)
+  for (i = 0; i < usize * 2; i++)
     {
       unsigned e = scramble[i];
       unsigned h = e % 2;
@@ -326,13 +317,13 @@ create_game (const char *name,
       unsigned y = e / (width * 2);
       TmpSetInfo *si = sets + e / 2;
       TmpSetInfo *osi;
-      dsk_warning ("removing %c wall at %u,%u",h?'h':'v', x,y);
       if (h)
         {
           if (y == 0)
             osi = si + (height - 1) * width;
           else
             osi = si - width;
+          game->h_walls[x + y * width] = 0;
         }
       else
         {
@@ -340,6 +331,7 @@ create_game (const char *name,
             osi = si + width - 1;
           else
             osi = si - 1;
+          game->v_walls[x + y * width] = 0;
         }
       dsk_assert (osi->set_number != si->set_number);
       TmpSetInfo *kring = osi->set_number < si->set_number ? osi : si;              /* ring to keep */
@@ -354,8 +346,18 @@ create_game (const char *name,
           unsigned x = (dring - sets) % width;
           unsigned y = (dring - sets) / width;
           int wall_idx;
-          dsk_warning ("converting set %u into %u", dring->set_number, set);
           dring->set_number = set;
+
+#if 0
+          if (wall_list)
+            {
+              dsk_assert (wall_list->prev == NULL);
+              TmpWall *t;
+              for (t = wall_list; t; t = t->next)
+                if (t->next)
+                  dsk_assert (t->next->prev == t);
+            }
+#endif
 
           /* Maybe remove left wall from candidate set of walls. */
           wall_idx = -1;
@@ -364,7 +366,7 @@ create_game (const char *name,
           else if (x == 0 && game->wrap && (dring+width-1)->set_number == set)
             wall_idx = 2 * (x + y * width);
           if (wall_idx >= 0)
-            remove_tmp_wall (game, tmp_walls, wall_idx, &wall_list);
+            remove_tmp_wall (tmp_walls, wall_idx, &wall_list);
 
           /* Maybe remove right wall from candidate set of walls. */
           wall_idx = -1;
@@ -373,7 +375,7 @@ create_game (const char *name,
           else if (x == width - 1 && game->wrap && (dring-width+1)->set_number == set)
             wall_idx = 2 * (0 + y * width);
           if (wall_idx >= 0)
-            remove_tmp_wall (game, tmp_walls, wall_idx, &wall_list);
+            remove_tmp_wall (tmp_walls, wall_idx, &wall_list);
 
           /* Maybe remove top wall from candidate set of walls. */
           wall_idx = -1;
@@ -382,16 +384,16 @@ create_game (const char *name,
           else if (y == 0 && game->wrap && (dring+width*(height-1))->set_number == set)
             wall_idx = 2 * (x + y * width) + 1;
           if (wall_idx >= 0)
-            remove_tmp_wall (game, tmp_walls, wall_idx, &wall_list);
+            remove_tmp_wall (tmp_walls, wall_idx, &wall_list);
 
           /* Maybe remove bottom wall from candidate set of walls. */
           wall_idx = -1;
-          if (x < width - 1 && (dring+1)->set_number == set)
-            wall_idx = 2 * ((x+1) + y * width) + 1;
-          else if (x == width - 1 && game->wrap && (dring-width+1)->set_number == set)
-            wall_idx = 2 * (0 + y * width) + 1;
+          if (y < height - 1 && (dring+width)->set_number == set)
+            wall_idx = 2 * (x + (y+1) * width) + 1;
+          else if (y == height - 1 && game->wrap && (dring-(height-1)*width)->set_number == set)
+            wall_idx = 2 * (x + 0 * width) + 1;
           if (wall_idx >= 0)
-            remove_tmp_wall (game, tmp_walls, wall_idx, &wall_list);
+            remove_tmp_wall (tmp_walls, wall_idx, &wall_list);
 
           dring = dring->next_in_set;
         }
@@ -430,7 +432,7 @@ create_game (const char *name,
         }
     }
 
-  game->timer = dsk_main_add_timer (0, UPDATE_PERIOD_USECS,
+  game->timer = dsk_main_add_timer_millis (UPDATE_PERIOD_MSECS,
                                     (DskTimerFunc) game_update_timer_callback,
                                     game);
   return game;
@@ -470,10 +472,51 @@ get_occupancy (Game *game, unsigned x, unsigned y, void **ptr_out)
 {
   Cell *cell;
   Object *object;
+  unsigned cx, cy;
   if (x >= CELL_SIZE * game->universe_width
    || y >= CELL_SIZE * game->universe_height)
     return OCC_WALL;
-  cell = game->cells + (x / CELL_SIZE) + (y / CELL_SIZE) * game->universe_width;
+  cx = x / CELL_SIZE;
+  cy = y / CELL_SIZE;
+  if (y % CELL_SIZE == 0)
+    {
+      if (game->h_walls[cy * game->universe_width + cx])
+        return OCC_WALL;
+      if (x % CELL_SIZE == 0)
+        {
+          if (x > 0)
+            {
+              if (game->h_walls[cy * game->universe_width + cx - 1])
+                return OCC_WALL;
+            }
+          else if (game->wrap)
+            {
+              if (game->h_walls[cy * game->universe_width + game->universe_width - 1])
+                return OCC_WALL;
+            }
+        }
+    }
+  if (x % CELL_SIZE == 0)
+    {
+      if (game->v_walls[cy * game->universe_width + cx])
+        return OCC_WALL;
+      if (y % CELL_SIZE == 0)
+        {
+          if (y > 0)
+            {
+              if (game->v_walls[(cy-1) * game->universe_width + cx])
+                return OCC_WALL;
+            }
+          else if (game->wrap)
+            {
+              if (game->v_walls[(game->universe_height-1) * game->universe_width + cx])
+                return OCC_WALL;
+            }
+        }
+    }
+
+
+  cell = game->cells + cx + cy * game->universe_width;
   object = cell_find_object (cell, OBJECT_TYPE_USER, x, y);
   if (object)
     {
@@ -836,7 +879,7 @@ game_update_timer_callback (Game *game)
       dsk_free (pu);
     }
 
-  game->timer = dsk_main_add_timer (0, UPDATE_PERIOD_USECS,
+  game->timer = dsk_main_add_timer_millis (UPDATE_PERIOD_MSECS,
                                     (DskTimerFunc) game_update_timer_callback,
                                     game);
 }
@@ -1030,6 +1073,8 @@ create_user_update (User *user)
 
   unsigned x, y;
 
+  dsk_warning ("create_user_update: %s: cells %d,%d w,h=%u,%u", user->name, min_cell_x, min_cell_y, cell_width, cell_height);
+
   for (x = 0; x < cell_width; x++)
     for (y = 0; y < cell_height; y++)
       {
@@ -1076,14 +1121,14 @@ create_user_update (User *user)
           {
             /* render vertical wall */
             add_wall (&n_elements, &elements, &alloced,
-                      px, py, TILE_SIZE, TILE_SIZE * CELL_SIZE);
+                      px, py, TILE_SIZE, TILE_SIZE * (CELL_SIZE+1));
           }
         if (cy <= game->universe_height && cx < game->universe_width
             && game->h_walls[cx + cy * game->universe_width])
           {
             /* render horizontal wall */
             add_wall (&n_elements, &elements, &alloced,
-                      px, py, TILE_SIZE * CELL_SIZE, TILE_SIZE);
+                      px, py, TILE_SIZE * (CELL_SIZE+1), TILE_SIZE);
           }
         if (cx >= game->universe_width || cy >= game->universe_height)
           continue;
@@ -1171,10 +1216,17 @@ respond_take_json (DskHttpServerRequest *request,
 {
   DskBuffer buffer = DSK_BUFFER_STATIC_INIT;
   DskHttpServerResponseOptions options = DSK_HTTP_SERVER_RESPONSE_OPTIONS_DEFAULT;
+  dsk_warning ("responding with user-update: %u elements", value->value.v_array.n_values);
   dsk_json_value_to_buffer (value, -1, &buffer);
   options.source_buffer = &buffer;
   options.content_type = "application/json";
   dsk_http_server_request_respond (request, &options);
+
+#if 0
+  dsk_json_value_to_buffer (value, 0, &buffer);
+  while (buffer.size)
+    dsk_buffer_writev (&buffer, 1);
+#endif
   dsk_json_value_free (value);
 }
 
@@ -1253,7 +1305,7 @@ handle_join_existing_game (DskHttpServerRequest *request)
       return;
     }
 
-  width = 400;
+  width = 700;
   height = 400;
   user = create_user (found_game, user_var->value, width, height);
   state_json = create_user_update (user);
@@ -1296,7 +1348,7 @@ handle_create_new_game (DskHttpServerRequest *request)
     }
 
   game = create_game (game_var->value, DEFAULT_UNIVERSE_WIDTH, DEFAULT_UNIVERSE_HEIGHT);
-  width = 400;
+  width = 700;
   height = 400;
   user = create_user (game, user_var->value, width, height);
   state_json = create_user_update (user);
@@ -1307,7 +1359,8 @@ static void
 handle_update_game (DskHttpServerRequest *request)
 {
   DskCgiVariable *user_var = dsk_http_server_request_lookup_cgi (request, "user");
-  DskCgiVariable *actions_var = dsk_http_server_request_lookup_cgi (request, "actions");
+  DskCgiVariable *dx_var = dsk_http_server_request_lookup_cgi (request, "dx");
+  DskCgiVariable *dy_var = dsk_http_server_request_lookup_cgi (request, "dy");
   User *user = find_user (user_var->value);
   char buf[512];
   if (user == NULL)
@@ -1315,6 +1368,22 @@ handle_update_game (DskHttpServerRequest *request)
       snprintf (buf, sizeof (buf), "user %s not found", user_var->value);
       dsk_http_server_request_respond_error (request, DSK_HTTP_STATUS_BAD_REQUEST, buf);
       return;
+    }
+  if (dx_var != NULL)
+    {
+      user->move_x = atoi (dx_var->value);
+      if (user->move_x < -1)
+        user->move_x = -1;
+      else if (user->move_x > 1)
+        user->move_x = 1;
+    }
+  if (dy_var != NULL)
+    {
+      user->move_y = atoi (dy_var->value);
+      if (user->move_y < -1)
+        user->move_y = -1;
+      else if (user->move_y > 1)
+        user->move_y = 1;
     }
   if (user->last_update == user->base.game->latest_update)
     {
@@ -1339,7 +1408,7 @@ render_hwall_line_ascii (unsigned width,
 {
   unsigned i;
   for (i = 0; i < width; i++)
-    printf ("+%c", walls[i] ? '-' : ' ');
+    printf ("+%s", walls[i] ? "--" : "  ");
   printf ("+\n");
 }
 static void
@@ -1348,7 +1417,7 @@ render_vwall_line_ascii (unsigned width,
 {
   unsigned i;
   for (i = 0; i < width; i++)
-    printf ("%c ", walls[i] ? '|' : ' ');
+    printf ("%c  ", walls[i] ? '|' : ' ');
   printf ("%c\n", walls[0] ? '|' : ' ');
 }
 static DSK_CMDLINE_CALLBACK_DECLARE(handle_make_maze)

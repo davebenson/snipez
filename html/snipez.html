@@ -4,11 +4,13 @@
 <script type="text/javascript">
 var base_url;
 
+var playing_game = false;
+
+
 function ajax_json(url, handler)
 {
   var req = new XMLHttpRequest();
 
-  alert("ajax_json: url=" + url);
 
   req.onreadystatechange = function()
   {
@@ -34,6 +36,8 @@ function render_screen(elements)
   // clear canvas
   context.fillStyle = "#000000";
   context.fillRect(0, 0, can.width, can.height);
+
+  //alert("got render_screen instructions with " + elements.length + " bits");
 
   // render each element
   for (var i = 0; i < elements.length; i++)
@@ -65,11 +69,17 @@ function render_screen(elements)
 var in_game = false;
 var game_name;
 var user_name;
+var move_x = 0;
+var move_y = 0;
 
 function update_handler()
 {
   // compute update url
-  var url = base_url + "/update?user=" . urlencode(user_name);
+  var url = base_url
+          + "/update?user="
+	  + encodeURIComponent(user_name)
+	  + "&dx=" + move_x
+	  + "&dy=" + move_y;
   //...
 
   // Make request, with a callback that will re-invoke this
@@ -86,13 +96,18 @@ function update_handler()
 
 function do_start_new_game()
 {
+  user_name = document.getElementById("user_id_input").value;
+  game_name = document.getElementById("game_name_input").value;
   var url = base_url
           + "/newgame?user="
-	  + encodeURIComponent(document.getElementById("user_id_input").value)
+	  + encodeURIComponent(user_name)
           + "&game="
-	  + encodeURIComponent(document.getElementById("game_name_input").value);
+	  + encodeURIComponent(game_name);
+
+  document.getElementById("can").style = "default"; ///XXX: what is the default style named?
   ajax_json(url,
             function (j) {
+	      playing_game = true;
 	      render_screen(j);
 	      update_handler();
 	    }
@@ -124,20 +139,76 @@ function select_game()
 	     // handle the JSON response: create a list of active games,
 	     // each of which will require an "onclick" handler.
 	     //...
+	     var tab = document.getElementById("select_game");
+	     for (var i =0; i < j.length; i++)
+	     {
+	       var row = tab.insertRow(tab.rows.length);
+	       row.insertCell(0).innerHTML = j[i].name;
+	       row.insertCell(1).innerHTML = j[i].players.join();
+	     }
 
 	     // make the selection menu visible
-	     container.style = "visible";
+	     tab.style = "visible";
            });
 }
 
+
+
+function handle_keydown(ev)
+{
+  if (!playing_game)
+    return true;
+  switch (ev.keyCode)
+    {
+    case 37:  // left arrow
+      move_x = -1;
+      return false;
+    case 38:  // up arrow
+      move_y = -1;
+      return false;
+    case 39:  // right arrow
+      move_x = 1;
+      return false;
+    case 40:  // down arrow
+      move_y = 1;
+      return false;
+    default:
+      alert("code = " + ev.keyCode);
+    }
+  return true;
+}
+
+function handle_keyup(ev)
+{
+  if (!playing_game)
+    return true;
+  switch (ev.keyCode)
+    {
+    case 37:  // left arrow
+    case 39:  // right arrow
+      move_x = 0;
+      return false;
+    case 38:  // up arrow
+    case 40:  // down arrow
+      move_y = 0;
+      return false;
+    default:
+    }
+  return true;
+}
+
+
 </script>
 </head>
-<body onload="select_game()" >
+<body onload="select_game()" onkeyup="return handle_keyup(event)" onkeydown="return handle_keydown(event)" >
 
 <h1>Snipez</h1>
 
 <!-- will be filled up, occasionally, with a game-selection dialog -->
-<p id="select_game" style="invisible">
+<p>
+ <table id="select_game" style="invisible">
+  <tr><th>Game</th><th>Players</th></tr>
+ </table>
 </p>
 
 <!-- dialog to enter the user-id, needed to join or create a game -->
