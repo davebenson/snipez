@@ -1,3 +1,6 @@
 
 server: server.c
-	gcc -Wall -W -o server server.c ../../dsk/libdsk.a
+	gcc -g -Wall -W -o server server.c ../../dsk/libdsk.a
+
+clean:
+	rm -f server

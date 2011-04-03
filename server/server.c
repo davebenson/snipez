@@ -33,6 +33,10 @@
 /* enemies move random in 1/2 of cycles */
 #define ENEMY_MOVE_FRACTION    0.5
 
+/* size of maze */
+#define DEFAULT_UNIVERSE_WIDTH  24
+#define DEFAULT_UNIVERSE_HEIGHT 24
+
 #include "../../dsk/dsk.h"
 
 #include <stdlib.h>
@@ -211,6 +215,11 @@ remove_tmp_wall (Game *game,
   unsigned x = (index / 2) % game->universe_width;
   unsigned y = (index / 2) / game->universe_width;
   unsigned h = index % 2;
+
+  /* ignore previously deleted elements */
+  if (remove->prev == (void*) 1)
+    return;
+  dsk_warning ("removing tmp_wall from candidate list %c at %u,%u",h?'h':'v', x,y);
   if (remove->prev == NULL)
     {
       dsk_assert (*wall_list_inout == remove);
@@ -238,7 +247,10 @@ static void swap_ints (unsigned *a, unsigned *b)
 static void game_update_timer_callback (Game *game);
 
 static Game *
-create_game (const char *name)
+create_game (const char *name,
+             unsigned    width,
+             unsigned    height)
+
 {
   Game *game = dsk_malloc (sizeof (Game));
   unsigned usize;
@@ -247,14 +259,14 @@ create_game (const char *name)
   game->name = dsk_strdup (name);
   game->next_game = all_games;
   all_games = game;
-  game->universe_width = 32;
-  game->universe_height = 32;
-  usize = game->universe_height * game->universe_width;
+  game->universe_width = width;
+  game->universe_height = height;
+  usize = width * height;
   game->h_walls = generate_ones (usize);
   game->v_walls = generate_ones (usize);
   for (i = 0; i < N_OBJECT_TYPES; i++)
     game->objects[i] = NULL;
-  game->cells = dsk_malloc0 (sizeof (Cell) * game->universe_width * game->universe_height);
+  game->cells = dsk_malloc0 (sizeof (Cell) * width * height);
   game->latest_update = 0;
   game->wrap = DSK_TRUE;
   game->diag_bullets_bounce = DSK_TRUE;
@@ -264,7 +276,6 @@ create_game (const char *name)
   /* Generate with Modified Kruskals Algorithm, see 
    *    http://en.wikipedia.org/wiki/Maze_generation_algorithm
    */
-  usize = game->universe_width * game->universe_height;
   TmpWall *tmp_walls = dsk_malloc (sizeof (TmpWall) * usize * 2);
   TmpSetInfo *sets = dsk_malloc (sizeof (TmpSetInfo) * usize);
 
@@ -277,12 +288,12 @@ create_game (const char *name)
     swap_ints (scramble + random_int_range (usize * 2), scramble + random_int_range (usize * 2));
 
   TmpWall *wall_list = NULL;
-  for (i = 0; i < game->universe_width * game->universe_height; i++)
+  for (i = 0; i < usize; i++)
     {
       unsigned e = scramble[i];
       unsigned h = e % 2;
-      unsigned x = (e / 2) % game->universe_width;
-      unsigned y = e / (game->universe_width * 2);
+      unsigned x = (e / 2) % width;
+      unsigned y = e / (width * 2);
       if (!game->wrap)
         {
           if ((h && y == 0) || (!h && x == 0))
@@ -303,26 +314,32 @@ create_game (const char *name)
 
   while (wall_list != NULL)
     {
+      /* Invariants:
+           - the sets are in a ring by set number.
+           - The wall_list only consists of walls that separate distinct sets.
+       */
+
       /* remove wall */
       unsigned e = wall_list - tmp_walls;
       unsigned h = e % 2;
-      unsigned x = (e / 2) % game->universe_width;
-      unsigned y = e / (game->universe_width * 2);
+      unsigned x = (e / 2) % width;
+      unsigned y = e / (width * 2);
       TmpSetInfo *si = sets + e / 2;
       TmpSetInfo *osi;
+      dsk_warning ("removing %c wall at %u,%u",h?'h':'v', x,y);
       if (h)
         {
-          if (x == 0)
-            osi = si + game->universe_width - 1;
+          if (y == 0)
+            osi = si + (height - 1) * width;
           else
-            osi = si - 1;
+            osi = si - width;
         }
       else
         {
-          if (y == 0)
-            osi = si + (game->universe_height - 1) * game->universe_width;
+          if (x == 0)
+            osi = si + width - 1;
           else
-            osi = si - game->universe_width;
+            osi = si - 1;
         }
       dsk_assert (osi->set_number != si->set_number);
       TmpSetInfo *kring = osi->set_number < si->set_number ? osi : si;              /* ring to keep */
@@ -331,46 +348,48 @@ create_game (const char *name)
 
       /* combine sets (removing any walls that no longer separate different sets
          from the list of walls to remove) */
+      unsigned set = kring->set_number;
       do
         {
-          unsigned x = (dring - sets) % game->universe_width;
-          unsigned y = (dring - sets) / game->universe_width;
+          unsigned x = (dring - sets) % width;
+          unsigned y = (dring - sets) / width;
           int wall_idx;
-          dring->set_number = kring->set_number;
+          dsk_warning ("converting set %u into %u", dring->set_number, set);
+          dring->set_number = set;
 
           /* Maybe remove left wall from candidate set of walls. */
           wall_idx = -1;
-          if (x > 0 && (dring-1)->set_number == dring->set_number)
-            wall_idx = 2 * (x + y * game->universe_width);
-          else if (x == 0 && game->wrap && (dring+game->universe_width-1)->set_number == kring->set_number)
-            wall_idx = 2 * (x + y * game->universe_width);
+          if (x > 0 && (dring-1)->set_number == set)
+            wall_idx = 2 * (x + y * width);
+          else if (x == 0 && game->wrap && (dring+width-1)->set_number == set)
+            wall_idx = 2 * (x + y * width);
           if (wall_idx >= 0)
             remove_tmp_wall (game, tmp_walls, wall_idx, &wall_list);
 
           /* Maybe remove right wall from candidate set of walls. */
           wall_idx = -1;
-          if (x < game->universe_width - 1 && (dring+1)->set_number == dring->set_number)
-            wall_idx = 2 * ((x+1) + y * game->universe_width);
-          else if (x == game->universe_width - 1 && game->wrap && (dring-game->universe_width+1)->set_number == kring->set_number)
-            wall_idx = 2 * (0 + y * game->universe_width);
+          if (x < width - 1 && (dring+1)->set_number == set)
+            wall_idx = 2 * ((x+1) + y * width);
+          else if (x == width - 1 && game->wrap && (dring-width+1)->set_number == set)
+            wall_idx = 2 * (0 + y * width);
           if (wall_idx >= 0)
             remove_tmp_wall (game, tmp_walls, wall_idx, &wall_list);
 
           /* Maybe remove top wall from candidate set of walls. */
           wall_idx = -1;
-          if (y > 0 && (dring-game->universe_width)->set_number == dring->set_number)
-            wall_idx = 2 * (x + y * game->universe_width) + 1;
-          else if (y == 0 && game->wrap && (dring+game->universe_width*(game->universe_height-1))->set_number == kring->set_number)
-            wall_idx = 2 * (x + y * game->universe_width) + 1;
+          if (y > 0 && (dring-width)->set_number == dring->set_number)
+            wall_idx = 2 * (x + y * width) + 1;
+          else if (y == 0 && game->wrap && (dring+width*(height-1))->set_number == set)
+            wall_idx = 2 * (x + y * width) + 1;
           if (wall_idx >= 0)
             remove_tmp_wall (game, tmp_walls, wall_idx, &wall_list);
 
           /* Maybe remove bottom wall from candidate set of walls. */
           wall_idx = -1;
-          if (x < game->universe_width - 1 && (dring+1)->set_number == dring->set_number)
-            wall_idx = 2 * ((x+1) + y * game->universe_width) + 1;
-          else if (x == game->universe_width - 1 && game->wrap && (dring-game->universe_width+1)->set_number == kring->set_number)
-            wall_idx = 2 * (0 + y * game->universe_width) + 1;
+          if (x < width - 1 && (dring+1)->set_number == set)
+            wall_idx = 2 * ((x+1) + y * width) + 1;
+          else if (x == width - 1 && game->wrap && (dring-width+1)->set_number == set)
+            wall_idx = 2 * (0 + y * width) + 1;
           if (wall_idx >= 0)
             remove_tmp_wall (game, tmp_walls, wall_idx, &wall_list);
 
@@ -382,6 +401,7 @@ create_game (const char *name)
       TmpSetInfo *old_dring_next = dring->next_in_set;
       dring->next_in_set = kring->next_in_set;
       kring->next_in_set = old_dring_next;
+
     }
 
   dsk_free (tmp_walls);
@@ -397,8 +417,8 @@ create_game (const char *name)
         {
           cell->generator = dsk_malloc (sizeof (Generator));
           cell->generator->game = game;
-          cell->generator->x = (idx % game->universe_width) * CELL_SIZE + CELL_SIZE/2;
-          cell->generator->y = (idx / game->universe_width) * CELL_SIZE + CELL_SIZE/2;
+          cell->generator->x = (idx % width) * CELL_SIZE + CELL_SIZE/2;
+          cell->generator->y = (idx / width) * CELL_SIZE + CELL_SIZE/2;
           cell->generator->generator_prob = 0.01;
           cell->generator->next_in_game = game->generators;
           cell->generator->prev_in_game = NULL;
@@ -1275,7 +1295,7 @@ handle_create_new_game (DskHttpServerRequest *request)
       return;
     }
 
-  game = create_game (game_var->value);
+  game = create_game (game_var->value, DEFAULT_UNIVERSE_WIDTH, DEFAULT_UNIVERSE_HEIGHT);
   width = 400;
   height = 400;
   user = create_user (game, user_var->value, width, height);
@@ -1312,6 +1332,54 @@ handle_update_game (DskHttpServerRequest *request)
     }
 }
 
+/* --- utility modes of the main program --- */
+static void
+render_hwall_line_ascii (unsigned width,
+                         const uint8_t *walls)
+{
+  unsigned i;
+  for (i = 0; i < width; i++)
+    printf ("+%c", walls[i] ? '-' : ' ');
+  printf ("+\n");
+}
+static void
+render_vwall_line_ascii (unsigned width,
+                         const uint8_t *walls)
+{
+  unsigned i;
+  for (i = 0; i < width; i++)
+    printf ("%c ", walls[i] ? '|' : ' ');
+  printf ("%c\n", walls[0] ? '|' : ' ');
+}
+static DSK_CMDLINE_CALLBACK_DECLARE(handle_make_maze)
+{
+  unsigned width, height;
+  unsigned y;
+  Game *game;
+  DSK_UNUSED (arg_name); DSK_UNUSED (callback_data);
+  if (arg_value == NULL)
+    width = height = 10;
+  else
+    {
+      if (sscanf (arg_value, "%ux%u", &width, &height) != 2)
+        {
+          dsk_set_error (error, "error parsing WIDTHxHEIGHT for --make-maze");
+          return DSK_FALSE;
+        }
+    }
+
+
+  game = create_game ("name doesn't matter", width, height);
+  for (y = 0; y < height; y++)
+    {
+      render_hwall_line_ascii (width, game->h_walls + width * y);
+      render_vwall_line_ascii (width, game->v_walls + width * y);
+    }
+  render_hwall_line_ascii (width, game->h_walls);
+  exit (0);
+  return DSK_TRUE;
+}
+
 /* --- main program --- */
 static struct {
   const char *pattern;
@@ -1334,6 +1402,9 @@ int main(int argc, char **argv)
   dsk_cmdline_init ("snipez server", "Run a snipez server", NULL, 0);
   dsk_cmdline_add_uint ("port", "Port Number",
                         "PORT", DSK_CMDLINE_MANDATORY, &port);
+  dsk_cmdline_add_func ("make-maze", "Make a Maze",
+                        "WIDTHxHEIGHT", DSK_CMDLINE_OPTIONAL,
+                        handle_make_maze, NULL);
   dsk_cmdline_process_args (&argc, &argv);
 
   server = dsk_http_server_new ();

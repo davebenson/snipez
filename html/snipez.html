@@ -2,9 +2,13 @@
 <head>
 <title>snipezzzz</title>
 <script type="text/javascript">
+var base_url;
+
 function ajax_json(url, handler)
 {
   var req = new XMLHttpRequest();
+
+  alert("ajax_json: url=" + url);
 
   req.onreadystatechange = function()
   {
@@ -13,12 +17,12 @@ function ajax_json(url, handler)
       if (req.status==200)
       {
         handler(JSON.parse(req.responseText));
+      } else {
+	alert("Download was not successful");
       }
-    } else {
-      alert("Download was not successful");
     }
   }
-  req.open("POST", url, true);
+  req.open("GET", url, true);
   req.send(null);		
 }
 
@@ -49,9 +53,9 @@ function render_screen(elements)
       context.fill();
       break;
     case "hollow_box":
-      ... USE:  elt.x elt.y elt.width elt.height elt.color
       context.strokeStyle = elt.color;
-      context.strokeRect(elt.x, elt.y, elt.width, elt.height);
+      context.rect(elt.x, elt.y, elt.width, elt.height);
+      context.stroke();
       break;
     }
   }
@@ -65,12 +69,28 @@ var user_name;
 function update_handler()
 {
   // compute update url
-  var url = "/update?user=" . urlencode(user_name);
-  ...
+  var url = base_url + "/update?user=" . urlencode(user_name);
+  //...
 
   // Make request, with a callback that will re-invoke this
   // function.  (The server blocks if we request twice in
   // one update cycle, so this is efficient, i.e. not just busy looping)
+  ajax_json(url,
+            function (j) {
+	      render_screen(j);
+	      update_handler();
+	    }
+	   );
+}
+
+
+function do_start_new_game()
+{
+  var url = base_url
+          + "/newgame?user="
+	  + encodeURIComponent(document.getElementById("user_id_input").value)
+          + "&game="
+	  + encodeURIComponent(document.getElementById("game_name_input").value);
   ajax_json(url,
             function (j) {
 	      render_screen(j);
@@ -92,15 +112,18 @@ function select_game()
   document.getElementById("enter_user_id").style = "default"; ///XXX: what is the default style named?
 
   // enable "Start new game"
-  ...
+  document.getElementById("start_new_game").style = "default"; ///XXX: what is the default style named?
+
+  // compute base-url here...
+  base_url = "http://" + window.location.host;
 
   // fetch the list of active games
-  download("/games?user=" + urlencode(getElementById("userid_entry").text),
+  ajax_json(base_url + "/games?user=" + encodeURIComponent(document.getElementById("user_id_input").value),
            function (j)
 	   {
 	     // handle the JSON response: create a list of active games,
 	     // each of which will require an "onclick" handler.
-	     ...
+	     //...
 
 	     // make the selection menu visible
 	     container.style = "visible";
@@ -121,6 +144,12 @@ function select_game()
 <p id="enter_user_id" style="invisible">
 Enter your user-id:
  <input type="text" id="user_id_input" />
+</p>
+
+<p id="start_new_game" style="invisible">
+Start a new game!
+ <input type="text" id="game_name_input" />
+ <input type="button" id="start_new_game_link" onclick="do_start_new_game()" value="Go!" />
 </p>
 
 <!-- space for rendering the world -->
