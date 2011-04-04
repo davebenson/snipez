@@ -166,10 +166,9 @@ function select_game()
 	     {
 	       var row = tab.insertRow(tab.rows.length);
 	       var cell = row.insertCell(0);
-	       cell.innerHTML = j[i].name;
-	       cell.onclick = function(e) {
-	         ...
-	       };
+	       var name = j[i].name;
+	       cell.innerHTML = name;
+	       cell.onclick = function(e) { do_select_existing_game(name); };
 	       row.insertCell(1).innerHTML = j[i].players.join();
 	     }
 
