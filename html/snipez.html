@@ -71,6 +71,8 @@ var game_name;
 var user_name;
 var move_x = 0;
 var move_y = 0;
+var bullet_x = 0;
+var bullet_y = 0;
 
 function update_handler()
 {
@@ -79,7 +81,9 @@ function update_handler()
           + "/update?user="
 	  + encodeURIComponent(user_name)
 	  + "&dx=" + move_x
-	  + "&dy=" + move_y;
+	  + "&dy=" + move_y
+	  + "&bx=" + bullet_x
+	  + "&by=" + bullet_y;
   //...
 
   // Make request, with a callback that will re-invoke this
@@ -172,6 +176,18 @@ function handle_keydown(ev)
     case 40:  // down arrow
       move_y = 1;
       return false;
+    case 65:  // 'A'
+      bullet_x = -1;
+      return false;
+    case 68:  // 'D'
+      bullet_x = 1;
+      return false;
+    case 87:  // 'W'
+      bullet_y = -1;
+      return false;
+    case 88:  // 'X'
+      bullet_y = 1;
+      return false;
     default:
       alert("code = " + ev.keyCode);
     }
@@ -191,6 +207,14 @@ function handle_keyup(ev)
     case 38:  // up arrow
     case 40:  // down arrow
       move_y = 0;
+      return false;
+    case 65:  // 'A'
+    case 68:  // 'D'
+      bullet_x = 0;
+      return false;
+    case 87:  // 'W'
+    case 88:  // 'X'
+      bullet_y = 0;
       return false;
     default:
     }

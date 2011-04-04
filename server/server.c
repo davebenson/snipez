@@ -30,6 +30,9 @@
 /* cells moved by bullets in a cycle */
 #define BULLET_SPEED    2
 
+/* minimum turns in between bullet fires */
+#define BULLET_BLOCK_PERIOD 3
+
 /* enemies move random in 1/2 of cycles */
 #define ENEMY_MOVE_FRACTION    0.5
 
@@ -104,6 +107,9 @@ struct _User
   unsigned last_seen_time;
   int move_x, move_y;
 
+  unsigned bullet_block;
+  int bullet_x, bullet_y;
+
   unsigned dead_count;
 
   /* if you connect and you already have gotten the latest
@@ -118,7 +124,7 @@ struct _Enemy
 
 struct _Bullet
 {
-  unsigned x, y;
+  Object base;
   int move_x, move_y;           /* max 1 -- see bullet speed */
   Bullet *next_in_cell, *prev_in_cell;
   Bullet *next_in_game, *prev_in_game;
@@ -257,6 +263,7 @@ create_game (const char *name,
   game->v_walls = generate_ones (usize);
   for (i = 0; i < N_OBJECT_TYPES; i++)
     game->objects[i] = NULL;
+  game->generators = NULL;
   game->cells = dsk_malloc0 (sizeof (Cell) * width * height);
   game->latest_update = 0;
   game->wrap = DSK_TRUE;
@@ -408,9 +415,12 @@ create_game (const char *name,
 
   dsk_free (tmp_walls);
   dsk_free (sets);
+  dsk_free (scramble);
 
   /* generate generators */
   unsigned n_generators = 12 + rand () % 6;
+  dsk_warning ("%u generators", n_generators);
+  i = 0;
   while (i < n_generators)
     {
       unsigned idx = random_int_range (usize);
@@ -421,6 +431,7 @@ create_game (const char *name,
           cell->generator->game = game;
           cell->generator->x = (idx % width) * CELL_SIZE + CELL_SIZE/2;
           cell->generator->y = (idx / width) * CELL_SIZE + CELL_SIZE/2;
+          dsk_warning ("created generator at %u,%u",cell->generator->x ,cell->generator->y);
           cell->generator->generator_prob = 0.01;
           cell->generator->next_in_game = game->generators;
           cell->generator->prev_in_game = NULL;
@@ -552,10 +563,20 @@ remove_object_from_cell_list (Object *object)
   unsigned idx = (object->x/CELL_SIZE)
                + (object->y/CELL_SIZE) * object->game->universe_width;
   Cell *cell = object->game->cells + idx;
+
+#if 0
+  // Assert: the object is in the list */
+    {Object*tmp;for(tmp=cell->objects[object->type];tmp;tmp=tmp->next_in_cell)if (tmp==object)break;dsk_assert (tmp != NULL);}
+#endif
+
+
   if (object->prev_in_cell != NULL)
     object->prev_in_cell->next_in_cell = object->next_in_cell;
   else
-    cell->objects[object->type] = object->next_in_cell;
+    {
+      dsk_assert (cell->objects[object->type] == object);
+      cell->objects[object->type] = object->next_in_cell;
+    }
   if (object->next_in_cell != NULL)
     object->next_in_cell->prev_in_cell = object->prev_in_cell;
 }
@@ -568,6 +589,7 @@ add_object_to_cell_list (Object *object)
   Cell *cell = object->game->cells + idx;
 
   object->next_in_cell = cell->objects[object->type];
+
   if (object->next_in_cell)
     object->next_in_cell->prev_in_cell = object;
   object->prev_in_cell = NULL;
@@ -631,11 +653,12 @@ game_update_timer_callback (Game *game)
       if (user->dead_count > 0)
         {
           user->dead_count -= 1;
-          if (user->dead_count)
+          if (user->dead_count == 0)
             {
               teleport_object (&user->base);
               add_object_to_cell_list (object);
             }
+          object = object->next_in_game;
           continue;
         }
       if (user->move_x || user->move_y)
@@ -669,6 +692,25 @@ game_update_timer_callback (Game *game)
               destroy_user = DSK_TRUE;
               break;
             }
+        }
+      if (user->bullet_block > 0)
+        user->bullet_block--;
+      else if (user->bullet_x || user->bullet_y)
+        {
+          /* create bullet */
+          Bullet *bullet = dsk_malloc (sizeof (Bullet));
+          bullet->base.type = OBJECT_TYPE_BULLET;
+          bullet->base.game = game;
+
+          /* create bullet on top of the user, we'll move it in the next loop */
+          bullet->base.x = user->base.x;
+          bullet->base.y = user->base.y;
+          add_object_to_cell_list (&bullet->base);
+          add_object_to_game_list (&bullet->base);
+          bullet->move_x = user->bullet_x;
+          bullet->move_y = user->bullet_y;
+
+          user->bullet_block = BULLET_BLOCK_PERIOD;
         }
       if (destroy_user)
         {
@@ -861,8 +903,8 @@ game_update_timer_callback (Game *game)
               enemy->base.x = x;
               enemy->base.y = y;
               enemy->base.game = game;
-              add_object_to_cell_list (object);
-              add_object_to_game_list (object);
+              add_object_to_cell_list (&enemy->base);
+              add_object_to_game_list (&enemy->base);
             }
         }
     }
@@ -872,13 +914,14 @@ game_update_timer_callback (Game *game)
     {
       DskJsonValue *state_json;
       PendingUpdate *pu = game->pending_updates;
-      game->pending_updates = pu;
+      game->pending_updates = pu->next;
 
       state_json = create_user_update (pu->user);
       respond_take_json (pu->request, state_json);
       dsk_free (pu);
     }
 
+  game->latest_update += 1;
   game->timer = dsk_main_add_timer_millis (UPDATE_PERIOD_MSECS,
                                     (DskTimerFunc) game_update_timer_callback,
                                     game);
@@ -904,6 +947,9 @@ create_user (Game *game, const char *name, unsigned width, unsigned height)
 
   add_object_to_game_list (&user->base);
   add_object_to_cell_list (&user->base);
+
+  user->bullet_block = 0;
+  user->bullet_x = user->bullet_y = 0;
 
   user->width = width;
   user->height = height;
@@ -1058,8 +1104,8 @@ create_user_update (User *user)
   /* width/height in various units, rounded up */
   unsigned tile_width = (user->width + TILE_SIZE - 1) / TILE_SIZE;
   unsigned tile_height = (user->height + TILE_SIZE - 1) / TILE_SIZE;
-  unsigned cell_width = (tile_width + CELL_SIZE - 1) / CELL_SIZE;
-  unsigned cell_height = (tile_height + CELL_SIZE - 1) / CELL_SIZE;
+  unsigned cell_width = (tile_width + CELL_SIZE * 2 - 2) / CELL_SIZE;
+  unsigned cell_height = (tile_height + CELL_SIZE * 2 - 2) / CELL_SIZE;
 
   /* left/upper corner, rounded down */
   int min_tile_x = user->base.x - (tile_width+1) / 2;
@@ -1072,8 +1118,6 @@ create_user_update (User *user)
   unsigned n_elements = 0;
 
   unsigned x, y;
-
-  dsk_warning ("create_user_update: %s: cells %d,%d w,h=%u,%u", user->name, min_cell_x, min_cell_y, cell_width, cell_height);
 
   for (x = 0; x < cell_width; x++)
     for (y = 0; y < cell_height; y++)
@@ -1167,12 +1211,14 @@ create_user_update (User *user)
           {
             int bx = px + (cell->generator->x - cx * CELL_SIZE) * TILE_SIZE + TILE_SIZE;
             int by = py + (cell->generator->y - cy * CELL_SIZE) * TILE_SIZE + TILE_SIZE;
-            add_generator (&n_elements, &elements, &alloced, bx, by, object->game->latest_update);
+            add_generator (&n_elements, &elements, &alloced, bx, by, user->base.game->latest_update);
           }
       }
   DskJsonValue *rv;
   rv = dsk_json_value_new_array (n_elements, elements);
   dsk_free (elements);
+
+  user->last_update = game->latest_update;
   return rv;
 }
 
@@ -1216,7 +1262,6 @@ respond_take_json (DskHttpServerRequest *request,
 {
   DskBuffer buffer = DSK_BUFFER_STATIC_INIT;
   DskHttpServerResponseOptions options = DSK_HTTP_SERVER_RESPONSE_OPTIONS_DEFAULT;
-  dsk_warning ("responding with user-update: %u elements", value->value.v_array.n_values);
   dsk_json_value_to_buffer (value, -1, &buffer);
   options.source_buffer = &buffer;
   options.content_type = "application/json";
@@ -1276,7 +1321,7 @@ handle_join_existing_game (DskHttpServerRequest *request)
   DskCgiVariable *game_var = dsk_http_server_request_lookup_cgi (request, "game");
   DskCgiVariable *user_var = dsk_http_server_request_lookup_cgi (request, "user");
   char buf[512];
-  Game *game, *found_game = NULL;
+  Game *game;
   User *user;
   DskJsonValue *state_json;
   unsigned width, height;
@@ -1307,7 +1352,7 @@ handle_join_existing_game (DskHttpServerRequest *request)
 
   width = 700;
   height = 400;
-  user = create_user (found_game, user_var->value, width, height);
+  user = create_user (game, user_var->value, width, height);
   state_json = create_user_update (user);
   respond_take_json (request, state_json);
 }
@@ -1355,12 +1400,26 @@ handle_create_new_game (DskHttpServerRequest *request)
   respond_take_json (request, state_json);
 }
 
+static void parse_int_clamp (DskCgiVariable *var, int *val_inout)
+{
+  if (var != NULL)
+    {
+      *val_inout = atoi (var->value);
+      if (*val_inout < -1)
+        *val_inout = -1;
+      else if (*val_inout > 1)
+        *val_inout = 1;
+    }
+}
+
 static void
 handle_update_game (DskHttpServerRequest *request)
 {
   DskCgiVariable *user_var = dsk_http_server_request_lookup_cgi (request, "user");
   DskCgiVariable *dx_var = dsk_http_server_request_lookup_cgi (request, "dx");
   DskCgiVariable *dy_var = dsk_http_server_request_lookup_cgi (request, "dy");
+  DskCgiVariable *bx_var = dsk_http_server_request_lookup_cgi (request, "bx");
+  DskCgiVariable *by_var = dsk_http_server_request_lookup_cgi (request, "by");
   User *user = find_user (user_var->value);
   char buf[512];
   if (user == NULL)
@@ -1369,22 +1428,10 @@ handle_update_game (DskHttpServerRequest *request)
       dsk_http_server_request_respond_error (request, DSK_HTTP_STATUS_BAD_REQUEST, buf);
       return;
     }
-  if (dx_var != NULL)
-    {
-      user->move_x = atoi (dx_var->value);
-      if (user->move_x < -1)
-        user->move_x = -1;
-      else if (user->move_x > 1)
-        user->move_x = 1;
-    }
-  if (dy_var != NULL)
-    {
-      user->move_y = atoi (dy_var->value);
-      if (user->move_y < -1)
-        user->move_y = -1;
-      else if (user->move_y > 1)
-        user->move_y = 1;
-    }
+  parse_int_clamp (dx_var, &user->move_x);
+  parse_int_clamp (dy_var, &user->move_y);
+  parse_int_clamp (bx_var, &user->bullet_x);
+  parse_int_clamp (by_var, &user->bullet_y);
   if (user->last_update == user->base.game->latest_update)
     {
       /* wait for next frame */
@@ -1474,6 +1521,7 @@ int main(int argc, char **argv)
   dsk_cmdline_add_func ("make-maze", "Make a Maze",
                         "WIDTHxHEIGHT", DSK_CMDLINE_OPTIONAL,
                         handle_make_maze, NULL);
+  dsk_cmdline_add_shortcut ('p', "port");
   dsk_cmdline_process_args (&argc, &argv);
 
   server = dsk_http_server_new ();
