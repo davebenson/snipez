@@ -82,7 +82,7 @@ function update_handler()
 	  + encodeURIComponent(user_name)
 	  + "&dx=" + move_x
 	  + "&dy=" + move_y
-	  + "&bx=" + bullet_x
+	   "&bx=" + bullet_x
 	  + "&by=" + bullet_y;
   //...
 
@@ -104,6 +104,24 @@ function do_start_new_game()
   game_name = document.getElementById("game_name_input").value;
   var url = base_url
           + "/newgame?user="
+	  + encodeURIComponent(user_name)
+          + "&game="
+	  + encodeURIComponent(game_name);
+
+  document.getElementById("can").style = "default"; ///XXX: what is the default style named?
+  ajax_json(url,
+            function (j) {
+	      playing_game = true;
+	      render_screen(j);
+	      update_handler();
+	    }
+	   );
+}
+function do_select_existing_game(game_name)
+{
+  user_name = document.getElementById("user_id_input").value;
+  var url = base_url
+          + "/join?user="
 	  + encodeURIComponent(user_name)
           + "&game="
 	  + encodeURIComponent(game_name);
@@ -147,7 +165,11 @@ function select_game()
 	     for (var i =0; i < j.length; i++)
 	     {
 	       var row = tab.insertRow(tab.rows.length);
-	       row.insertCell(0).innerHTML = j[i].name;
+	       var cell = row.insertCell(0);
+	       cell.innerHTML = j[i].name;
+	       cell.onclick = function(e) {
+	         ...
+	       };
 	       row.insertCell(1).innerHTML = j[i].players.join();
 	     }
 
@@ -189,7 +211,8 @@ function handle_keydown(ev)
       bullet_y = 1;
       return false;
     default:
-      alert("code = " + ev.keyCode);
+      //alert("code = " + ev.keyCode);
+      break;
     }
   return true;
 }
