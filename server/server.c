@@ -22,7 +22,7 @@
 #define CELL_SIZE       10
 
 /* period for update timer */
-#define UPDATE_PERIOD_MSECS     50
+static unsigned update_period_msecs = 50;
 
 /* number of updates dying lasts for */
 #define DEAD_TIME       20
@@ -270,6 +270,7 @@ create_game (const char *name,
   game->diag_bullets_bounce = DSK_TRUE;
   game->bullet_kills_player = DSK_TRUE;
   game->bullet_kills_generator = DSK_TRUE;
+  game->pending_updates = NULL;
 
   /* Generate with Modified Kruskals Algorithm, see 
    *    http://en.wikipedia.org/wiki/Maze_generation_algorithm
@@ -443,7 +444,7 @@ create_game (const char *name,
         }
     }
 
-  game->timer = dsk_main_add_timer_millis (UPDATE_PERIOD_MSECS,
+  game->timer = dsk_main_add_timer_millis (update_period_msecs,
                                     (DskTimerFunc) game_update_timer_callback,
                                     game);
   return game;
@@ -922,7 +923,7 @@ game_update_timer_callback (Game *game)
     }
 
   game->latest_update += 1;
-  game->timer = dsk_main_add_timer_millis (UPDATE_PERIOD_MSECS,
+  game->timer = dsk_main_add_timer_millis (update_period_msecs,
                                     (DskTimerFunc) game_update_timer_callback,
                                     game);
 }
@@ -1518,6 +1519,8 @@ int main(int argc, char **argv)
   dsk_cmdline_init ("snipez server", "Run a snipez server", NULL, 0);
   dsk_cmdline_add_uint ("port", "Port Number",
                         "PORT", DSK_CMDLINE_MANDATORY, &port);
+  dsk_cmdline_add_uint ("update-period", "Update Period",
+                        "MILLIS", 0, &update_period_msecs);
   dsk_cmdline_add_func ("make-maze", "Make a Maze",
                         "WIDTHxHEIGHT", DSK_CMDLINE_OPTIONAL,
                         handle_make_maze, NULL);

@@ -10,7 +10,7 @@ var playing_game = false;
 function ajax_json(url, handler)
 {
   var req = new XMLHttpRequest();
-
+  //console.log("makeing request to " + url);
 
   req.onreadystatechange = function()
   {
@@ -20,7 +20,8 @@ function ajax_json(url, handler)
       {
         handler(JSON.parse(req.responseText));
       } else {
-	alert("Download was not successful");
+	console.log("Download " + url + " was not successful");
+	handler(null);
       }
     }
   }
@@ -82,7 +83,7 @@ function update_handler()
 	  + encodeURIComponent(user_name)
 	  + "&dx=" + move_x
 	  + "&dy=" + move_y
-	   "&bx=" + bullet_x
+	  + "&bx=" + bullet_x
 	  + "&by=" + bullet_y;
   //...
 
@@ -167,7 +168,7 @@ function select_game()
 	       var row = tab.insertRow(tab.rows.length);
 	       var cell = row.insertCell(0);
 	       var name = j[i].name;
-	       cell.innerHTML = name;
+	       cell.innerHTML = "<u>" + name + "</u>";
 	       cell.onclick = function(e) { do_select_existing_game(name); };
 	       row.insertCell(1).innerHTML = j[i].players.join();
 	     }
@@ -210,7 +211,7 @@ function handle_keydown(ev)
       bullet_y = 1;
       return false;
     default:
-      //alert("code = " + ev.keyCode);
+      //console.log("code = " + ev.keyCode);
       break;
     }
   return true;
