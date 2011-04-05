@@ -59,6 +59,7 @@ function render_screen(elements)
       break;
     case "hollow_box":
       context.strokeStyle = elt.color;
+      context.beginPath();
       context.rect(elt.x, elt.y, elt.width, elt.height);
       context.stroke();
       break;
@@ -168,7 +169,7 @@ function select_game()
 	       var row = tab.insertRow(tab.rows.length);
 	       var cell = row.insertCell(0);
 	       var name = j[i].name;
-	       cell.appendChild(...);
+	       cell.innerHTML = "<u>" + name + "</u>";
 	       cell.onclick = function(e) { do_select_existing_game(name); };
 	       row.insertCell(1).innerHTML = j[i].players.join();
 	     }
